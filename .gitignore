@@ -1,0 +1,8 @@
+*.pkl
+*.model
+*.h5
+*.pth
+*.safetensors
+phishing_model/
+__pycache__/
+.env
