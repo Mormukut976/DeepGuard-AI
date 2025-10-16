@@ -1,126 +1,74 @@
-import torch
-from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
-import numpy as np
-import os
+import re
+from datetime import datetime
 
 class PhishingDetector:
-    def __init__(self, model_path='./phishing_model'):
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"📧 Loading phishing model from {model_path}...")
-        
-        try:
-            self.tokenizer = DistilBertTokenizer.from_pretrained(model_path)
-            self.model = DistilBertForSequenceClassification.from_pretrained(model_path)
-            self.model.to(self.device)
-            self.model.eval()
-            print("✅ Phishing detector loaded successfully!")
-        except Exception as e:
-            print(f"❌ Error loading phishing model: {e}")
-            raise e
-
-    def predict(self, email_text):
-        """Email analyze karein aur phishing probability return karein"""
-        try:
-            inputs = self.tokenizer(
-                email_text,
-                truncation=True,
-                padding=True,
-                max_length=128,
-                return_tensors='pt'
-            )
-
-            inputs = {key: value.to(self.device) for key, value in inputs.items()}
-
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
-            
-            phishing_prob = predictions[0][1].item()
-            legit_prob = predictions[0][0].item()
-            
-            return {
-                'is_phishing': phishing_prob > 0.7,
-                'phishing_probability': phishing_prob,
-                'legitimate_probability': legit_prob,
-                'confidence': max(phishing_prob, legit_prob),
-                'risk_level': self._get_risk_level(phishing_prob),
-                'verdict': '🚨 PHISHING' if phishing_prob > 0.7 else '✅ LEGITIMATE'
-            }
-        except Exception as e:
-            return {
-                'error': str(e),
-                'is_phishing': False,
-                'phishing_probability': 0.0,
-                'risk_level': 'UNKNOWN'
-            }
-
-    def _get_risk_level(self, probability):
-        if probability > 0.9:
-            return "CRITICAL"
-        elif probability > 0.7:
-            return "HIGH"
-        elif probability > 0.5:
-            return "MEDIUM"
-        else:
-            return "LOW"
-
-    def analyze_multiple_emails(self, email_list):
-        """Multiple emails ko analyze karein"""
-        results = []
-        for i, email in enumerate(email_list):
-            result = self.predict(email)
-            result['email_id'] = i + 1
-            result['email_preview'] = email[:80] + "..." if len(email) > 80 else email
-            results.append(result)
-        
-        # Summary statistics
-        phishing_count = sum(1 for r in results if r.get('is_phishing', False))
-        total_emails = len(results)
-        
-        summary = {
-            'total_emails': total_emails,
-            'phishing_detected': phishing_count,
-            'legitimate_count': total_emails - phishing_count,
-            'phishing_percentage': (phishing_count / total_emails) * 100 if total_emails > 0 else 0
-        }
-        
-        return {
-            'summary': summary,
-            'detailed_results': results
-        }
-
-# Test function
-def test_phishing_detector():
-    """Test the phishing detector"""
-    print("🧪 Testing Phishing Detector...")
-    
-    try:
-        detector = PhishingDetector()
-        
-        test_emails = [
-            "Congratulations! You won $1000. Click here to claim your prize",
-            "Hi John, meeting scheduled for tomorrow at 3 PM. Best regards",
-            "URGENT: Your bank account will be suspended. Verify now!",
-            "Your package has been delivered. Track your order here",
-            "Free iPhone! Click now to claim your gift"
+    def __init__(self):
+        self.phishing_keywords = [
+            'urgent', 'verify', 'suspended', 'security', 'login',
+            'account', 'password', 'confirm', 'click', 'link',
+            'winner', 'prize', 'free', 'money', 'bank',
+            'paypal', 'amazon', 'ebay', 'facebook', 'google'
         ]
-        
-        results = detector.analyze_multiple_emails(test_emails)
-        
-        print(f"\n📊 Summary:")
-        print(f"Total emails: {results['summary']['total_emails']}")
-        print(f"Phishing detected: {results['summary']['phishing_detected']}")
-        print(f"Legitimate: {results['summary']['legitimate_count']}")
-        
-        print(f"\n📧 Detailed Results:")
-        for result in results['detailed_results']:
-            print(f"Email {result['email_id']}: {result['verdict']}")
-            print(f"  Phishing Probability: {result['phishing_probability']:.3f}")
-            print(f"  Risk Level: {result['risk_level']}")
-            print()
-            
-    except Exception as e:
-        print(f"❌ Test failed: {e}")
+        self.suspicious_domains = [
+            'verify-', 'security-', 'login-', 'account-',
+            'free-', 'prize-', 'winner-'
+        ]
+        self.stats = {'total_checks': 0}
 
-if __name__ == "__main__":
-    test_phishing_detector()
+    def analyze_email(self, email_content):
+        """Analyze email for phishing attempts"""
+        self.stats['total_checks'] += 1
+        
+        score = 0
+        details = []
+        
+        # Check for urgent language
+        urgent_words = ['urgent', 'immediately', 'asap', 'important']
+        for word in urgent_words:
+            if word in email_content.lower():
+                score += 1
+                details.append(f"Urgent language detected: '{word}'")
+        
+        # Check for suspicious keywords
+        for keyword in self.phishing_keywords:
+            if keyword in email_content.lower():
+                score += 0.5
+                details.append(f"Suspicious keyword: '{keyword}'")
+        
+        # Check for suspicious links
+        url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        urls = re.findall(url_pattern, email_content)
+        
+        for url in urls:
+            score += 2
+            details.append(f"Suspicious URL: {url}")
+        
+        # Determine threat level
+        if score >= 5:
+            is_phishing = True
+            threat_level = "High"
+            confidence = min(score / 10, 0.95)
+        elif score >= 3:
+            is_phishing = True
+            threat_level = "Medium"
+            confidence = min(score / 10, 0.85)
+        elif score >= 1:
+            is_phishing = False
+            threat_level = "Low"
+            confidence = 0.3
+        else:
+            is_phishing = False
+            threat_level = "Very Low"
+            confidence = 0.1
+
+        return {
+            "is_phishing": is_phishing,
+            "confidence": confidence,
+            "threat_level": threat_level,
+            "details": details,
+            "score": score,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    def get_stats(self):
+        return self.stats

@@ -1,382 +1,268 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
 import uvicorn
+import threading
+import time
 from datetime import datetime
-import logging
-import sys
-import os
-from fastapi.responses import JSONResponse
-
-# Add src to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-
-# Import our detectors
 from src.detectors.phishing_detector import PhishingDetector
-from src.detectors.log_detector import LogAnomalyDetector
-from src.detectors.network_detector import NetworkAnomalyDetector
+from src.detectors.log_detector import LogDetector
+from src.detectors.network_detector import NetworkDetector
+from src.detectors.threat_intel import ThreatIntel
+from src.detectors.network_scanner import RealTimeNetworkScanner
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+# FastAPI app initialization
 app = FastAPI(
-    title="DeepGuard AI API",
-    description="Intelligent Multi-Modal Cyber Threat Detection System",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    title="DeepGuard-AI API",
+    description="AI-powered Real-time Cybersecurity Threat Detection System",
+    version="2.0.0"
 )
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Initialize detectors
+phishing_detector = PhishingDetector()
+log_detector = LogDetector()
+network_detector = NetworkDetector()
+threat_intel = ThreatIntel()
 
-# Global detector instances
-phishing_detector = None
-log_detector = None
-network_detector = None
+# Real-time Network Scanner
+network_scanner = RealTimeNetworkScanner()
+scanning_status = {"is_scanning": False, "interface": None}
 
-# Request models
-class EmailRequest(BaseModel):
-    emails: List[str]
+# Request Models
+class PhishingRequest(BaseModel):
+    email_content: str
+    url: str = None
 
 class LogRequest(BaseModel):
-    logs: List[Dict[str, Any]]
+    log_data: str
 
 class NetworkRequest(BaseModel):
-    traffic: List[Dict[str, Any]]
+    interface: str = "eth0"
 
-class ComprehensiveRequest(BaseModel):
-    emails: Optional[List[str]] = None
-    logs: Optional[List[Dict[str, Any]]] = None
-    network_traffic: Optional[List[Dict[str, Any]]] = None
+# Real-time scanning thread
+scan_thread = None
 
-class HealthResponse(BaseModel):
-    status: str
-    timestamp: str
-    version: str
-    components: Dict[str, bool]
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize detectors on startup"""
-    global phishing_detector, log_detector, network_detector
-    
-    logger.info("🚀 Initializing DeepGuard AI Components...")
-    
+def background_network_scan(interface: str):
+    """Background me network scanning run karega"""
+    global scanning_status
     try:
-        # Initialize Phishing Detector
-        logger.info("📧 Loading Phishing Detector...")
-        phishing_detector = PhishingDetector()
-        logger.info("✅ Phishing Detector initialized")
-        
-        # Initialize Log Anomaly Detector
-        logger.info("📊 Loading Log Anomaly Detector...")
-        log_detector = LogAnomalyDetector()
-        logger.info("✅ Log Anomaly Detector initialized")
-        
-        # Initialize Network Anomaly Detector
-        logger.info("🌐 Loading Network Anomaly Detector...")
-        network_detector = NetworkAnomalyDetector()
-        logger.info("✅ Network Anomaly Detector initialized")
-        
-        logger.info("🎉 All DeepGuard AI components initialized successfully!")
-        
+        network_scanner.start_realtime_scan(interface)
     except Exception as e:
-        logger.error(f"❌ Error initializing components: {e}")
-        # Don't raise exception, let the server start with partial functionality
+        scanning_status["is_scanning"] = False
+        scanning_status["error"] = str(e)
 
-@app.get("/", response_model=HealthResponse)
+# Health Check
+@app.get("/")
 async def root():
-    """Root endpoint - System health check"""
-    return HealthResponse(
-        status="operational",
-        timestamp=datetime.now().isoformat(),
-        version="1.0.0",
-        components={
-            "phishing_detector": phishing_detector is not None,
-            "log_detector": log_detector is not None,
-            "network_detector": network_detector is not None
-        }
-    )
+    return {
+        "message": "🛡️ DeepGuard-AI API Server",
+        "status": "running",
+        "version": "2.0.0",
+        "timestamp": datetime.now().isoformat()
+    }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "DeepGuard AI API",
-        "components": {
-            "phishing_detector": "active" if phishing_detector else "inactive",
-            "log_detector": "active" if log_detector else "inactive",
-            "network_detector": "active" if network_detector else "inactive"
+        "services": {
+            "phishing_detector": "active",
+            "log_detector": "active", 
+            "network_detector": "active",
+            "threat_intel": "active",
+            "real_time_scanner": "ready"
         }
     }
 
-@app.post("/analyze/phishing")
-async def analyze_phishing(request: EmailRequest):
-    """
-    Analyze emails for phishing attempts
-    """
-    if not phishing_detector:
-        raise HTTPException(status_code=503, detail="Phishing detector not available")
-    
-    if not request.emails:
-        raise HTTPException(status_code=400, detail="No emails provided")
-    
+# Phishing Detection
+@app.post("/detect/phishing")
+async def detect_phishing(request: PhishingRequest):
     try:
-        logger.info(f"Analyzing {len(request.emails)} emails for phishing...")
-        
-        results = phishing_detector.analyze_multiple_emails(request.emails)
-        
+        result = phishing_detector.analyze_email(request.email_content)
         return {
-            "analysis_type": "phishing_detection",
-            "timestamp": datetime.now().isoformat(),
-            "total_emails_analyzed": len(request.emails),
-            "results": results
+            "is_phishing": result["is_phishing"],
+            "confidence": result["confidence"],
+            "threat_level": result["threat_level"],
+            "details": result["details"],
+            "timestamp": datetime.now().isoformat()
         }
-        
     except Exception as e:
-        logger.error(f"Phishing analysis error: {e}")
-        raise HTTPException(status_code=500, detail=f"Phishing analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Phishing detection error: {str(e)}")
 
+# Log Analysis
 @app.post("/analyze/logs")
 async def analyze_logs(request: LogRequest):
-    """
-    Analyze system logs for anomalies
-    """
-    if not log_detector:
-        raise HTTPException(status_code=503, detail="Log detector not available")
+    try:
+        result = log_detector.analyze_logs(request.log_data)
+        return {
+            "anomalies_detected": result["anomalies_detected"],
+            "anomaly_count": result["anomaly_count"],
+            "threat_level": result["threat_level"],
+            "suspicious_entries": result["suspicious_entries"],
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Log analysis error: {str(e)}")
+
+# REAL-TIME NETWORK SCANNING ENDPOINTS
+
+@app.post("/network/start_scan")
+async def start_network_scan(request: NetworkRequest):
+    global scanning_status, scan_thread
     
-    if not request.logs:
-        raise HTTPException(status_code=400, detail="No logs provided")
+    if scanning_status["is_scanning"]:
+        raise HTTPException(status_code=400, detail="Scanning already in progress")
     
     try:
-        logger.info(f"Analyzing {len(request.logs)} log entries...")
+        # Background thread me scanning start karein
+        scan_thread = threading.Thread(target=background_network_scan, args=(request.interface,))
+        scan_thread.daemon = True
+        scan_thread.start()
         
-        results = log_detector.analyze_real_time(request.logs)
-        
-        # Check if analysis returned an error
-        if 'error' in results:
-            logger.error(f"Log analysis returned error: {results['error']}")
-            return {
-                "analysis_type": "log_anomaly_detection",
-                "timestamp": datetime.now().isoformat(),
-                "total_logs_analyzed": len(request.logs),
-                "results": results
-            }
-        
-        return {
-            "analysis_type": "log_anomaly_detection",
-            "timestamp": datetime.now().isoformat(),
-            "total_logs_analyzed": len(request.logs),
-            "results": results
+        scanning_status = {
+            "is_scanning": True,
+            "interface": request.interface,
+            "started_at": datetime.now().isoformat()
         }
         
+        return {
+            "status": "scanning_started",
+            "interface": request.interface,
+            "message": f"Real-time network scanning started on {request.interface}",
+            "started_at": scanning_status["started_at"]
+        }
     except Exception as e:
-        logger.error(f"Log analysis error: {e}")
-        # Return error in response instead of raising exception
-        return JSONResponse(
-            status_code=200,
-            content={
-                "analysis_type": "log_anomaly_detection",
-                "timestamp": datetime.now().isoformat(),
-                "total_logs_analyzed": len(request.logs),
-                "results": {
-                    "error": str(e),
-                    "total_logs": 0,
-                    "anomalies_detected": 0,
-                    "anomaly_percentage": 0.0,
-                    "high_risk_alerts": []
-                }
-            }
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to start scanning: {str(e)}")
 
-@app.post("/analyze/network")
-async def analyze_network(request: NetworkRequest):
-    """
-    Analyze network traffic for anomalies
-    """
-    if not network_detector:
-        raise HTTPException(status_code=503, detail="Network detector not available")
+@app.post("/network/stop_scan")
+async def stop_network_scan():
+    global scanning_status
     
-    if not request.traffic:
-        raise HTTPException(status_code=400, detail="No network traffic data provided")
+    if not scanning_status["is_scanning"]:
+        raise HTTPException(status_code=400, detail="No active scanning session")
     
     try:
-        logger.info(f"Analyzing {len(request.traffic)} network connections...")
-        
-        results = network_detector.monitor_real_time(request.traffic)
+        network_scanner.stop_scan()
+        scanning_status = {
+            "is_scanning": False,
+            "interface": None,
+            "stopped_at": datetime.now().isoformat()
+        }
         
         return {
-            "analysis_type": "network_anomaly_detection",
-            "timestamp": datetime.now().isoformat(),
-            "total_connections_analyzed": len(request.traffic),
-            "results": results
+            "status": "scanning_stopped",
+            "message": "Real-time network scanning stopped",
+            "stopped_at": scanning_status["stopped_at"]
         }
-        
     except Exception as e:
-        logger.error(f"Network analysis error: {e}")
-        raise HTTPException(status_code=500, detail=f"Network analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop scanning: {str(e)}")
 
-@app.post("/analyze/comprehensive")
-async def comprehensive_analysis(request: ComprehensiveRequest):
-    """
-    Comprehensive multi-modal security analysis
-    """
-    results = {
-        "analysis_type": "comprehensive_multi_modal",
-        "timestamp": datetime.now().isoformat(),
-        "components_analyzed": [],
-        "results": {},
-        "security_score": 100,
-        "threats_detected": 0,
-        "security_status": "SECURE"
-    }
-    
-    threats_detected = 0
-    
-    # Phishing Analysis
-    if request.emails and phishing_detector:
-        try:
-            logger.info(f"Comprehensive analysis - Phishing: {len(request.emails)} emails")
-            phishing_results = phishing_detector.analyze_multiple_emails(request.emails)
-            results["results"]["phishing"] = phishing_results
-            results["components_analyzed"].append("phishing")
-            
-            # Update security score
-            phishing_count = phishing_results['summary']['phishing_detected']
-            threats_detected += phishing_count
-            results["security_score"] -= phishing_count * 10
-            
-        except Exception as e:
-            results["results"]["phishing"] = {"error": str(e)}
-            logger.error(f"Phishing analysis in comprehensive failed: {e}")
-    
-    # Log Analysis
-    if request.logs and log_detector:
-        try:
-            logger.info(f"Comprehensive analysis - Logs: {len(request.logs)} entries")
-            log_results = log_detector.analyze_real_time(request.logs)
-            results["results"]["logs"] = log_results
-            results["components_analyzed"].append("logs")
-            
-            # Update security score only if no error
-            if 'error' not in log_results:
-                log_anomalies = log_results.get('anomalies_detected', 0)
-                threats_detected += log_anomalies
-                results["security_score"] -= log_anomalies * 5
-            
-        except Exception as e:
-            results["results"]["logs"] = {"error": str(e)}
-            logger.error(f"Log analysis in comprehensive failed: {e}")
-    
-    # Network Analysis
-    if request.network_traffic and network_detector:
-        try:
-            logger.info(f"Comprehensive analysis - Network: {len(request.network_traffic)} connections")
-            network_results = network_detector.monitor_real_time(request.network_traffic)
-            results["results"]["network"] = network_results
-            results["components_analyzed"].append("network")
-            
-            # Update security score
-            network_anomalies = network_results.get('anomalous_connections', 0)
-            threats_detected += network_anomalies
-            results["security_score"] -= network_anomalies * 7
-            
-        except Exception as e:
-            results["results"]["network"] = {"error": str(e)}
-            logger.error(f"Network analysis in comprehensive failed: {e}")
-    
-    # Ensure security score doesn't go below 0
-    results["security_score"] = max(0, results["security_score"])
-    results["threats_detected"] = threats_detected
-    
-    # Determine overall security status
-    if results["security_score"] >= 80:
-        results["security_status"] = "SECURE"
-    elif results["security_score"] >= 60:
-        results["security_status"] = "MODERATE"
-    else:
-        results["security_status"] = "CRITICAL"
-    
-    return results
-
-@app.get("/system/status")
-async def system_status():
-    """Get detailed system status"""
-    return {
-        "status": "operational",
-        "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0",
-        "components": {
-            "phishing_detector": {
-                "status": "active" if phishing_detector else "inactive",
-                "description": "AI-powered phishing email detection"
-            },
-            "log_analyzer": {
-                "status": "active" if log_detector else "inactive", 
-                "description": "Anomaly detection in system logs"
-            },
-            "network_analyzer": {
-                "status": "active" if network_detector else "inactive",
-                "description": "Network traffic anomaly detection"
-            }
+@app.get("/network/status")
+async def get_network_status():
+    """Get network scanning status"""
+    try:
+        threats = network_scanner.get_threats()
+        
+        # Active threats (last 5 minutes)
+        current_time = time.time()
+        active_threats = []
+        
+        for threat in threats:
+            # Agar timestamp ISO format me hai
+            if isinstance(threat.get('timestamp'), str) and 'T' in threat['timestamp']:
+                try:
+                    from datetime import datetime
+                    threat_time = datetime.fromisoformat(threat['timestamp'].replace('Z', '+00:00')).timestamp()
+                    if current_time - threat_time < 300:  # 5 minutes
+                        active_threats.append(threat)
+                except:
+                    active_threats.append(threat)
+            else:
+                # Agar numeric timestamp hai
+                threat_time = threat.get('timestamp', 0)
+                if current_time - threat_time < 300:  # 5 minutes
+                    active_threats.append(threat)
+        
+        return {
+            "scanning_status": scanning_status,
+            "threats_detected": len(threats),
+            "active_threats": active_threats,
+            "total_threats": len(threats)
         }
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Network status error: {str(e)}")
 
-@app.get("/models/info")
-async def models_info():
-    """Get information about loaded ML models"""
-    return {
-        "phishing_model": {
-            "type": "DistilBERT",
-            "task": "Text Classification",
-            "labels": ["legitimate", "phishing"],
-            "status": "loaded" if phishing_detector else "not loaded"
-        },
-        "log_anomaly_model": {
-            "type": "Isolation Forest", 
-            "task": "Anomaly Detection",
-            "status": "loaded" if log_detector else "not loaded"
-        },
-        "network_anomaly_model": {
-            "type": "Isolation Forest",
-            "task": "Anomaly Detection", 
-            "status": "loaded" if network_detector else "not loaded"
+@app.get("/network/threats")
+async def get_network_threats():
+    try:
+        threats = network_scanner.get_threats()
+        return {
+            "threats": threats[-50:],  # Last 50 threats
+            "total_threats": len(threats),
+            "high_severity_threats": len([t for t in threats if t.get('severity') == 'high']),
+            "timestamp": datetime.now().isoformat()
         }
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get threats: {str(e)}")
 
-# Error handlers
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail, "error_type": "HTTPException"}
-    )
+@app.get("/network/interfaces")
+async def get_network_interfaces():
+    try:
+        interfaces = network_scanner.get_network_interfaces()
+        return {
+            "available_interfaces": interfaces,
+            "default_interface": interfaces[0] if interfaces else None,
+            "total_interfaces": len(interfaces)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get interfaces: {str(e)}")
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    logger.error(f"Global error handler: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error", "error_type": "Exception"}
-    )
+# System Statistics - YE ADD KAREIN
+@app.get("/system/stats")
+async def get_system_stats():
+    """Get system statistics"""
+    try:
+        return {
+            "uptime": time.time(),
+            "total_phishing_checks": phishing_detector.get_stats().get('total_checks', 0),
+            "total_log_analyses": log_detector.get_stats().get('total_analyses', 0),
+            "network_threats_detected": len(network_scanner.get_threats()),
+            "real_time_scanning": scanning_status["is_scanning"],
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"System stats error: {str(e)}")
 
-# For direct execution
+# Network Packet Analysis
+@app.get("/network/packet_stats")
+async def get_packet_stats():
+    try:
+        stats = network_scanner.get_packet_statistics()
+        return {
+            "packet_statistics": stats,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get packet stats: {str(e)}")
+
+# Threat Intelligence
+@app.get("/threat/intel/{ip_address}")
+async def get_threat_intel(ip_address: str):
+    try:
+        intel_data = threat_intel.check_ip_reputation(ip_address)
+        return {
+            "ip_address": ip_address,
+            "threat_intel": intel_data,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Threat intelligence error: {str(e)}")
+
 if __name__ == "__main__":
     uvicorn.run(
-        "main:app",
-        host="0.0.0.0", 
+        "src.api.main:app",
+        host="0.0.0.0",
         port=8000,
         reload=True,
         log_level="info"
-        )
+    )
